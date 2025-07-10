@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mermaid リアルタイムビューア（最終改善版）</title>
+    <style>
+        /* 基本的なリセットとページ全体のスタイル */
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            overflow: hidden;
+            /* スクロールバーを非表示に */
+            user-select: none;
+            /* テキスト選択を無効化（リサイズ操作中の意図しない選択を防ぐ） */
+        }
+
+        /* メインコンテナのスタイル */
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+
+        /* エディタ（左側）とビューア（右側）の共通スタイル */
+        .editor-pane,
+        .viewer-pane {
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            /* 縦方向に要素を並べる */
+            overflow: hidden;
+            /* 子要素のスクロールは各pane-contentで行う */
+        }
+
+        .editor-pane {
+            width: 50%;
+            /* 初期幅 */
+            min-width: 200px;
+            /* 最小幅 */
+        }
+
+        .viewer-pane {
+            flex-grow: 1;
+            /* 残りの幅をすべて使用 */
+            min-width: 300px;
+            /* 最小幅 */
+        }
+
+        /* リサイズ用のハンドル */
+        .resizer {
+            width: 5px;
+            cursor: col-resize;
+            /* カーソルをリサイズアイコンに変更 */
+            background-color: #ddd;
+            flex-shrink: 0;
+            position: relative;
+            z-index: 10;
+        }
+
+        .resizer:hover {
+            background-color: #007bff;
+        }
+
+        .pane-header {
+            height: 2.5rem;
+            padding: 10px 15px;
+            background-color: #f7f7f7;
+            border-bottom: 1px solid #ddd;
+            flex-shrink: 0;
+            /* ヘッダーが縮まないようにする */
+        }
+
+        .pane-content {
+            overflow: hidden;
+            /* スクロールはさせず、内部の要素に任せる */
+            flex-grow: 1;
+            /* 残りの高さいっぱいに広げる */
+            padding: 0;
+            position: relative;
+        }
+
+        .viewer-pane .pane-content {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #sanitize-button {
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: bold;
+            color: #fff;
+            background-color: #007bff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        #sanitize-button:hover {
+            background-color: #0056b3;
+        }
+
+        #code-input-wrapper {
+            width: 100%;
+            height: 100%;
+            overflow-y: auto;
+        }
+
+        #code-input {
+            width: 100%;
+            height: 100%;
+            border: none;
+            padding: 10px;
+            font-family: "SF Mono", "Consolas", "Menlo", monospace;
+            font-size: 16px;
+            line-height: 1.5;
+            resize: none;
+            box-sizing: border-box;
+            outline: none;
+        }
+
+        #mermaid-output {
+            width: 100%;
+            height: 100%;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+
+        /* ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️ */
+        /* SVGが少なくとも親コンテナのサイズを持つように設定。これにより、SVGが小さく表示されるのを防ぎます。 */
+        #mermaid-output>svg {
+            min-width: 100%;
+            min-height: 100%;
+        }
+
+        /* ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️ */
+
+        /* エラーメッセージのスタイル */
+        .error-message {
+            padding: 15px;
+            color: red;
+            font-weight: bold;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="editor-pane">
+            <div class="pane-header">
+                <button id="sanitize-button">エラーを修正</button>
+            </div>
+            <div class="pane-content" id="code-input-wrapper">
+                <textarea id="code-input"></textarea>
+            </div>
+        </div>
+
+        <div class="resizer" id="resizer"></div>
+
+        <div class="viewer-pane">
+            <div class="pane-header">
+                <strong>プレビュー (マウスホイールで拡大・縮小, ドラッグで移動)</strong>
+            </div>
+            <div class="pane-content">
+                <div id="mermaid-output"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.8.1/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const codeInput = document.getElementById('code-input');
+            const mermaidOutput = document.getElementById('mermaid-output');
+            const sanitizeButton = document.getElementById('sanitize-button');
+            const editorPane = document.querySelector('.editor-pane');
+            const resizer = document.getElementById('resizer');
+
+            let panZoomInstance = null;
+
+            mermaid.initialize({
+                startOnLoad: false,
+                theme: 'default',
+                securityLevel: 'loose',
+                logLevel: 'fatal'
+            });
+
+            const initialCode = `graph TD
+    A["クリスマス"] -->|プレゼントをもらう| B(Go);
+    B --> C{"考えたか？"};
+    C -->|Yes| D["自律開発環境サービス (DevEnv)"];
+    C -->|No| E["ググる"];
+    E --> D;
+    D --> F["渡す"];
+    F --> G((Happy! ));
+`;
+            codeInput.value = initialCode;
+
+            const renderMermaid = async () => {
+                const mermaidCode = codeInput.value.trim();
+
+                if (panZoomInstance) {
+                    panZoomInstance.destroy();
+                    panZoomInstance = null;
+                }
+                mermaidOutput.innerHTML = '';
+
+                if (!mermaidCode) return;
+
+                try {
+                    const graphId = 'mermaid-graph-' + Date.now();
+                    const { svg } = await mermaid.render(graphId, mermaidCode);
+                    mermaidOutput.innerHTML = svg;
+
+                    const svgElement = mermaidOutput.querySelector('svg');
+                    if (svgElement) {
+                        svgElement.removeAttribute('width');
+                        svgElement.removeAttribute('height');
+
+                        panZoomInstance = svgPanZoom(svgElement, {
+                            zoomEnabled: true,
+                            panEnabled: true,
+                            controlIconsEnabled: false,
+                            fit: true,
+                            center: true,
+                            minZoom: 0.1,
+                            maxZoom: 10,
+                            zoomScaleSensitivity: 0.3
+                        });
+                    }
+
+                } catch (error) {
+                    console.error("Mermaid Render Error:", error);
+                    const errorMessage = document.createElement('pre');
+                    errorMessage.className = 'error-message';
+                    errorMessage.textContent = error.message || 'レンダリング中に不明なエラーが発生しました。';
+                    mermaidOutput.appendChild(errorMessage);
+                }
+            };
+
+            const sanitizeCode = () => {
+                let content = codeInput.value;
+                content = content.replace(/\p{Emoji_Presentation}|\p{Emoji}/gu, '');
+                const addQuotes = (match, start, text, end) => `${start}"${text.trim()}"${end}`;
+                content = content.replace(/(\w+\[)([^"\]\n]+)(\])/g, addQuotes);
+                content = content.replace(/(\w+\{)([^"}\n]+)(\})/g, addQuotes);
+                codeInput.value = content;
+                renderMermaid();
+            };
+
+            let isResizing = false;
+
+            resizer.addEventListener('mousedown', () => {
+                isResizing = true;
+                document.body.style.cursor = 'col-resize';
+                document.addEventListener('mousemove', handleMouseMove);
+                document.addEventListener('mouseup', () => {
+                    isResizing = false;
+                    document.body.style.cursor = 'default';
+                    document.removeEventListener('mousemove', handleMouseMove);
+                    if (panZoomInstance) {
+                        panZoomInstance.resize();
+                        panZoomInstance.center();
+                    }
+                }, { once: true });
+            });
+
+            function handleMouseMove(e) {
+                if (!isResizing) return;
+                const newLeftWidth = (e.clientX / document.body.clientWidth) * 100;
+                editorPane.style.width = `${newLeftWidth}%`;
+            }
+
+            codeInput.addEventListener('input', renderMermaid);
+            sanitizeButton.addEventListener('click', sanitizeCode);
+
+            window.addEventListener('resize', () => {
+                if (panZoomInstance) {
+                    panZoomInstance.resize();
+                    panZoomInstance.center();
+                }
+            });
+
+            renderMermaid();
+        });
+    </script>
+
+</body>
+
+</html>
