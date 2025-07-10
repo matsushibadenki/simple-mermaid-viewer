@@ -257,6 +257,18 @@
                 renderMermaid();
             };
 
+            // 貼り付け時に一度だけエラー修正を実行
+            let hasPasted = false;
+            codeInput.addEventListener('paste', () => {
+                if (!hasPasted) {
+                    hasPasted = true;
+                    // 貼り付けられたコンテンツが反映されるまで少し待つ
+                    setTimeout(() => {
+                        sanitizeCode();
+                    }, 10);
+                }
+            });
+
             let isResizing = false;
 
             resizer.addEventListener('mousedown', () => {
